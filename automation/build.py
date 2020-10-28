@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/python3
 
 import datetime
 import glob
@@ -35,8 +35,13 @@ SETTINGS = """
 
 
 def run_command(args):
+    env = dict(os.environ)
+    env["JAVA_HOME"] = "/usr/lib/jvm/java-11"
     print("Running command %s ..." % args)
-    proc = subprocess.Popen(args)
+    proc = subprocess.Popen(
+       args=args,
+       env=env,
+    )
     return proc.wait()
 
 
@@ -67,23 +72,6 @@ def dec_version(version):
     result = ".".join(parts)
     print("Decremented version is \"%s\"..." % result)
     return result
-
-
-def python_versions():
-    python_versions = []
-    for python_version in ['python2', 'python3']:
-        result, path = eval_command(['which', python_version])
-        if result != 0:
-            print("Python '%s' isn't installed on the system." % python_version)
-        else:
-            python_versions.append(path.strip())
-
-    return python_versions
-
-def is_rhel_8():
-    dist = platform.dist()
-    return len(dist) > 1 and dist[0] == 'redhat' and dist[1].startswith('8.')
-
 
 def main():
     # Clean the generated artifacts to the output directory:
@@ -167,7 +155,7 @@ def main():
     if version_qualifier is not None:
         pep440_version += version_qualifier
     if not is_release:
-        pep440_version += ".dev%s+git%s" % (version_date, commit_id)
+        pep440_version += ".dev%s+.git%s" % (version_date, commit_id)
     print("SDK version XYZ is \"%s\"." % version_xyz)
     print("SDK version qualifier is \"%s\"." % version_qualifier)
     print("SDK PEP440 version is \"%s\"." % pep440_version)
@@ -178,15 +166,15 @@ def main():
     with open(settings_path, "w") as settings_file:
         settings_file.write(SETTINGS)
 
-    for python_command in python_versions():
-        result = run_command([
-            "mvn",
-            "package",
-            "--settings=%s" % settings_path,
-            "-Dpython.command=%s" % python_command,
-            "-Dsdk.version=%s" % pep440_version,
-            "-Dskipflake=%s" % is_rhel_8(),
-        ])
+    result = run_command([
+        "mvn",
+        "package",
+        "--settings=%s" % settings_path,
+        "-Dpython.command=%s" % 'python3',
+        "-Dsdk.version=%s" % pep440_version,
+        "-Dskipflake=%s" % 'true',
+    ])
+
     if result != 0:
         print("Maven build failed with exit code %d." % result)
         sys.exit(1)
@@ -292,7 +280,7 @@ def main():
         rpm_release = dec_version(rpm_release)
         rpm_release += ".%s" % version_qualifier
     if not is_release:
-        rpm_release += ".%sgit%s" % (version_date, commit_id)
+        rpm_release += ".%s.git%s" % (version_date, commit_id)
     print("RPM version is \"%s\"." % rpm_version)
     print("RPM release is \"%s\"." % rpm_release)
 

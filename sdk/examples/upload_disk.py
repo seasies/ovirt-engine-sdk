@@ -20,95 +20,85 @@
 """
 Upload disk example code.
 
-Requires the qemu-img package for checking file type and virtual size.
-Requires the ovirt-imageio-common package > 1.5.0.
-
-Usage:
-
-    upload_disk.py FILE
+Requires the ovirt-imageio-client package.
 """
 
-from __future__ import print_function
-
-import argparse
-import getpass
+import inspect
 import json
-import logging
 import os
-import ovirtsdk4 as sdk
-import ovirtsdk4.types as types
 import subprocess
-import sys
 import time
 
-from ovirt_imageio_common import client
-from ovirt_imageio_common import ui
+from ovirt_imageio import client
 
-logging.basicConfig(level=logging.DEBUG, filename='example.log')
+from ovirtsdk4 import types
+
+from helpers import common
+from helpers import imagetransfer
+from helpers import units
+from helpers.common import progress
+
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Upload images")
+    parser = common.ArgumentParser(description="Upload images")
 
     parser.add_argument(
         "filename",
-        help="path to image (e.g. /path/to/image.raw) "
-             "Supported formats: raw, qcow2, iso")
-
-    parser.add_argument(
-        "--engine-url",
-        required=True,
-        help="transfer URL (e.g. https://engine_fqdn:port)")
-
-    parser.add_argument(
-        "--username",
-        required=True,
-        help="username of engine API")
-
-    parser.add_argument(
-        "--password-file",
-        help="file containing password of the specified by user (if file is "
-             "not specified, read from standard input)")
+        help="Path to image (e.g. /path/to/image.raw). "
+             "Supported formats: raw, qcow2, iso.")
 
     parser.add_argument(
         "--disk-format",
         choices=("raw", "qcow2"),
-        help="format of the created disk (default image format)")
+        help="Format of the created disk (default image format).")
 
     parser.add_argument(
         "--disk-sparse",
         action="store_true",
-        help="create sparse disk. Cannot be used with raw format on block storage.")
+        help="Create sparse disk. Cannot be used with raw format on "
+             "block storage.")
+
+    parser.add_argument(
+        "--enable-backup",
+        action="store_true",
+        help="Creates a disk that can be used for incremental backup. "
+             "Allowed for disk with qcow2 format only.")
 
     parser.add_argument(
         "--sd-name",
         required=True,
-        help="name of the storage domain.")
-
-    # Note: unix socket works only when running this tool on the same host serving
-    # the image.
-    parser.add_argument(
-        "-c", "--cafile",
-        help="path to oVirt engine certificate for verifying server.")
-
-    parser.add_argument(
-        "--insecure",
-        dest="secure",
-        action="store_false",
-        default=False,
-        help=("do not verify server certificates and host name (not "
-              "recommended)."))
+        help="Name of the storage domain.")
 
     parser.add_argument(
         "--use-proxy",
         dest="use_proxy",
         default=False,
         action="store_true",
-        help="upload via proxy on the engine host (less efficient)")
+        help="Upload via proxy on the engine host (less efficient).")
+
+    parser.add_argument(
+        "--max-workers",
+        type=int,
+        default=4,
+        help="Maximum number of workers to use for upload. The default "
+             "(4) improves performance when uploading a single disk. "
+             "You may want to use lower number if you upload many disks "
+             "in the same time.")
+
+    parser.add_argument(
+        "--buffer-size",
+        type=units.humansize,
+        default=client.BUFFER_SIZE,
+        help="Buffer size per worker. The default ({}) gives good "
+             "performance with the default number of workers. If you use "
+             "smaller number of workers you may want use larger value."
+             .format(client.BUFFER_SIZE))
 
     return parser.parse_args()
 
+
 def get_image_info(filename):
-    print("Checking image...")
+    progress("Checking image...")
 
     out = subprocess.check_output(
         ["qemu-img", "info", "--output", "json", filename])
@@ -118,6 +108,7 @@ def get_image_info(filename):
         raise RuntimeError("Unsupported image format %(format)s" % image_info)
 
     return image_info
+
 
 def get_disk_info(args, image_info):
     disk_info = {}
@@ -180,45 +171,29 @@ def get_disk_info(args, image_info):
 
 
 args = parse_args()
+common.configure_logging(args)
 
 # Get image and disk info using qemu-img
 image_info = get_image_info(args.filename)
 disk_info = get_disk_info(args, image_info)
 
-print("Image format: %s" % image_info["format"])
-print("Disk format: %s" % disk_info["format"])
-print("Disk content type: %s" % disk_info["content_type"])
-print("Disk provisioned size: %s" % disk_info["provisioned_size"])
-print("Disk initial size: %s" % disk_info["initial_size"])
-print("Disk name: %s" % disk_info["name"])
+progress("Image format: %s" % image_info["format"])
+progress("Disk format: %s" % disk_info["format"])
+progress("Disk content type: %s" % disk_info["content_type"])
+progress("Disk provisioned size: %s" % disk_info["provisioned_size"])
+progress("Disk initial size: %s" % disk_info["initial_size"])
+progress("Disk name: %s" % disk_info["name"])
+progress("Disk backup: %s" % args.enable_backup)
 
 # This example will connect to the server and create a new `floating`
 # disk, one that isn't attached to any virtual machine.
 # Then using transfer service it will transfer disk data from local
 # image to the newly created disk in server.
 
-# Create the connection to the server:
-print("Connecting...")
+progress("Connecting...")
+connection = common.create_connection(args)
 
-if args.password_file:
-    with open(args.password_file) as f:
-        password = f.read().rstrip('\n') # ovirt doesn't support empty lines in password
-else:
-    password = getpass.getpass()
-
-connection = sdk.Connection(
-    url=args.engine_url + '/ovirt-engine/api',
-    username=args.username,
-    password=password,
-    ca_file=args.cafile,
-    debug=True,
-    log=logging.getLogger(),
-)
-
-# Get the reference to the root service:
-system_service = connection.system_service()
-
-print("Creating disk...")
+progress("Creating disk...")
 
 disks_service = connection.system_service().disks_service()
 disk = disks_service.add(
@@ -230,6 +205,7 @@ disk = disks_service.add(
         initial_size=disk_info["initial_size"],
         provisioned_size=disk_info["provisioned_size"],
         sparse=args.disk_sparse,
+        backup=types.DiskBackup.INCREMENTAL if args.enable_backup else None,
         storage_domains=[
             types.StorageDomain(
                 name=args.sd_name
@@ -247,55 +223,57 @@ while True:
     if disk.status == types.DiskStatus.OK:
         break
 
-print("Creating transfer session...")
+progress("Disk ID: %s" % disk.id)
 
-# Get a reference to the service that manages the image
-# transfer that was added in the previous step:
-transfers_service = system_service.image_transfers_service()
+progress("Creating image transfer...")
 
-# Add a new image transfer:
-transfer = transfers_service.add(
-    types.ImageTransfer(
-        image=types.Image(
-            id=disk.id
-        ),
-        # Use raw format to enable NBD backend, supporting on-the-fly image
-        # format conversion.
-        format=types.DiskFormat.RAW,
-     )
-)
+# Find a host for this transfer. This is an optional step allowing optimizing
+# the transfer using unix socket when running this code on a oVirt hypervisor
+# in the same data center.
+host = imagetransfer.find_host(connection, args.sd_name)
 
-# Get reference to the created transfer service:
-transfer_service = transfers_service.image_transfer_service(transfer.id)
+transfer = imagetransfer.create_transfer(connection, disk,
+    types.ImageTransferDirection.UPLOAD, host=host)
 
-# After adding a new transfer for the disk, the transfer's status will be INITIALIZING.
-# Wait until the init phase is over. The actual transfer can start when its status is "Transferring".
-while transfer.phase == types.ImageTransferPhase.INITIALIZING:
-    time.sleep(1)
-    transfer = transfer_service.get()
-
-print("Uploading image...")
+progress("Transfer ID: %s" % transfer.id)
+progress("Transfer host name: %s" % transfer.host.name)
 
 # At this stage, the SDK granted the permission to start transferring the disk, and the
 # user should choose its preferred tool for doing it. We use the recommended
 # way, ovirt-imageio client library.
 
-if args.use_proxy:
-    destination_url = transfer.proxy_url
-else:
-    destination_url = transfer.transfer_url
+extra_args = {}
 
-with ui.ProgressBar() as pb:
+parameters = inspect.signature(client.download).parameters
+
+# Use multiple workers to speed up the upload.
+if "max_workers" in parameters:
+        extra_args["max_workers"] = args.max_workers
+
+if args.use_proxy:
+    upload_url = transfer.proxy_url
+else:
+    upload_url = transfer.transfer_url
+
+    # Use fallback to proxy_url if feature is available. Upload will use the
+    # proxy_url if transfer_url is not accessible.
+    if "proxy_url" in parameters:
+        extra_args["proxy_url"] = transfer.proxy_url
+
+progress("Uploading image...")
+
+with client.ProgressBar() as pb:
     client.upload(
         args.filename,
-        destination_url,
+        upload_url,
         args.cafile,
         secure=args.secure,
-        progress=pb)
+        buffer_size=args.buffer_size,
+        progress=pb,
+        **extra_args)
 
-print("Finalizing transfer session...")
-# Successful cleanup
-transfer_service.finalize()
+progress("Finalizing image transfer...")
+imagetransfer.finalize_transfer(connection, transfer, disk)
 connection.close()
 
-print("Upload completed successfully")
+progress("Upload completed successfully")

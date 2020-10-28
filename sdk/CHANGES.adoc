@@ -2,6 +2,44 @@
 
 This document describes the relevant changes between releases of the SDK.
 
+== 4.4.6 / Oct 20 2020
+
+* Upgrade to Model 4.4.20
+
+== 4.4.5 / Oct 13 2020
+
+* Upgrade to Model 4.4.19
+
+* Upgrade to Metamodel 1.3.3
+
+* Upgrade to Java 11
+
+* Update build scripts and remove old ones
+
+* Use helper classes in example scripts
+
+
+== 4.4.4 / Jul 1 2020
+
+* Update to model 4.4.17
+
+* Improve examples code around image transfer features
+
+== 4.4.3 / May 18 2020
+
+* Update to model 4.4.16
+
+* Updates to some example scripts
+
+
+== 4.4.2 / Mar 19 2020
+
+Update to model 4.4.14
+
+New features:
+
+* Make Travis depend on openjdk
+
 == 4.4.1 / Jan 16 2019
 
 New features:
@@ -149,7 +187,7 @@ New features:
 
 * Add `cancel` action to transfer image session.
 
-* Add `export` template as OVA to a given path on a host 
+* Add `export` template as OVA to a given path on a host
   https://bugzilla.redhat.com/1526033[#1526033].
 
 * Add service to list user groups

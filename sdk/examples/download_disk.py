@@ -17,103 +17,78 @@
 # limitations under the License.
 #
 
-from __future__ import print_function
+"""
+Download disk example code.
 
-import argparse
-import getpass
-import logging
-import ovirtsdk4 as sdk
-import ovirtsdk4.types as types
+Requires the ovirt-imageio-client package.
+"""
+
+import inspect
 import time
 
-from ovirt_imageio_common import client
-from ovirt_imageio_common import ui
+from ovirt_imageio import client
 
-logging.basicConfig(level=logging.DEBUG, filename='example.log')
+import ovirtsdk4.types as types
+
+from helpers import common
+from helpers import imagetransfer
+from helpers import units
+from helpers.common import progress
 
 # This example will connect to the server and download the data
 # of the disk to a local file.
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Download disk")
+    parser = common.ArgumentParser(description="Download disk")
 
     parser.add_argument(
         "disk_uuid",
-        help="disk UUID to download")
+        help="Disk UUID to download.")
 
     parser.add_argument(
         "filename",
-        help="path to downloaded disk")
-
-    parser.add_argument(
-        "--engine-url",
-        required=True,
-        help="oVirt engine URL (e.g. https://my-engine:port)")
-
-    parser.add_argument(
-        "--username",
-        required=True,
-        help="username of engine API")
-
-    parser.add_argument(
-        "-c", "--cafile",
-        required=True,
-        help="path to oVirt engine certificate for verifying server.")
-
-    parser.add_argument(
-        "--insecure",
-        dest="secure",
-        action="store_false",
-        default=False,
-        help=("do not verify server certificates and host name (not "
-              "recommended)."))
-
-    parser.add_argument(
-        "--password-file",
-        help="file containing password of the specified by user (if file is "
-             "not specified, read from standard input)")
+        help="Path to write downloaded image.")
 
     parser.add_argument(
         "-f", "--format",
         choices=("raw", "qcow2"),
         default="qcow2",
         help=("Downloaded file format. For best compatibility, use qcow2 "
-              "(default qcow2)"))
+              "(default qcow2)."))
 
     parser.add_argument(
         "--use-proxy",
         dest="use_proxy",
         default=False,
         action="store_true",
-        help="download via proxy on the engine host (less efficient)")
+        help="Download via proxy on the engine host (less efficient).")
+
+    parser.add_argument(
+        "--max-workers",
+        type=int,
+        default=4,
+        help="Maximum number of workers to use for download. The default "
+             "(4) improves performance when downloading a single disk. "
+             "You may want to use lower number if you download many disks "
+             "in the same time.")
+
+    parser.add_argument(
+        "--buffer-size",
+        type=units.humansize,
+        default=client.BUFFER_SIZE,
+        help="Buffer size per worker. The default ({}) gives good "
+             "performance with the default number of workers. If you use "
+             "smaller number of workers you may want use larger value."
+             .format(client.BUFFER_SIZE))
 
     return parser.parse_args()
 
 
-def read_password(args):
-    if args.password_file:
-        with open(args.password_file) as f:
-            return f.readline().rstrip('\n')
-    else:
-        return getpass.getpass()
-
-
 args = parse_args()
+common.configure_logging(args)
 
-# Create the connection to the server:
-print("Connecting...")
-
-connection = sdk.Connection(
-    url=args.engine_url + '/ovirt-engine/api',
-    username=args.username,
-    password=read_password(args),
-    ca_file=args.cafile,
-    debug=True,
-    log=logging.getLogger(),
-)
-
-# Get the reference to the root service:
-system_service = connection.system_service()
+progress("Connecting...")
+connection = common.create_connection(args)
 
 # Get the reference to the disks service:
 disks_service = connection.system_service().disks_service()
@@ -122,62 +97,60 @@ disks_service = connection.system_service().disks_service()
 disk_service = disks_service.disk_service(args.disk_uuid)
 disk = disk_service.get()
 
-print("Creating a transfer session...")
+# Find a host for this transfer. This is an optional step allowing optimizing
+# the transfer using unix socket when running this code on a oVirt hypervisor
+# in the same data center.
+sd_id = disk.storage_domains[0].id
+sds_service = connection.system_service().storage_domains_service()
+storage_domain = sds_service.storage_domain_service(sd_id).get()
+host = imagetransfer.find_host(connection, storage_domain.name)
 
-# Get a reference to the service that manages the image
-# transfer that was added in the previous step:
-transfers_service = system_service.image_transfers_service()
+progress("Creating image transfer...")
 
-# Add a new image transfer:
-transfer = transfers_service.add(
-    types.ImageTransfer(
-        image=types.Image(
-            id=disk.id
-        ),
-        direction=types.ImageTransferDirection.DOWNLOAD,
+transfer = imagetransfer.create_transfer(
+    connection, disk, types.ImageTransferDirection.DOWNLOAD, host=host)
 
-        # format=raw enables the NBD backend, enbaling:
-        # - Download raw guest data, regardless of the disk format.
-        # - Collapsed qcow2 chains to single raw file.
-        # - Extents reporting for qcow2 images and raw images on file storage,
-        #   speeding up the transfer.
-        format=types.DiskFormat.RAW,
-    )
-)
+progress("Transfer ID: %s" % transfer.id)
+progress("Transfer host name: %s" % transfer.host.name)
 
-# Get reference to the created transfer service:
-transfer_service = transfers_service.image_transfer_service(transfer.id)
+# At this stage, the SDK granted the permission to start transferring the disk, and the
+# user should choose its preferred tool for doing it. We use the recommended
+# way, ovirt-imageio client library.
 
-# After adding a new transfer for the disk, the transfer's status will be INITIALIZING.
-# Wait until the init phase is over. The actual transfer can start when its status is "Transferring".
-while transfer.phase == types.ImageTransferPhase.INITIALIZING:
-    time.sleep(1)
-    transfer = transfer_service.get()
+extra_args = {}
+
+parameters = inspect.signature(client.download).parameters
+
+# Use multiple workers to speed up the download.
+if "max_workers" in parameters:
+        extra_args["max_workers"] = args.max_workers
 
 if args.use_proxy:
     download_url = transfer.proxy_url
 else:
     download_url = transfer.transfer_url
 
-# At this stage, the SDK granted the permission to start transferring the disk, and the
-# user should choose its preferred tool for doing it. We use the recommended
-# way, ovirt-imageio client library.
+    # Use fallback to proxy_url if feature is available. Download will use the
+    # proxy_url if transfer_url is not accessible.
+    if "proxy_url" in parameters:
+        extra_args["proxy_url"] = transfer.proxy_url
 
-print("Downloading image...")
+progress("Downloading image...")
 
 try:
-    with ui.ProgressBar() as pb:
+    with client.ProgressBar() as pb:
         client.download(
             download_url,
             args.filename,
             args.cafile,
             fmt=args.format,
             secure=args.secure,
-            progress=pb)
+            buffer_size=args.buffer_size,
+            progress=pb,
+            **extra_args)
 finally:
-    # Finalize the session.
-    print("Finalizing transfer session...")
-    transfer_service.finalize()
+    progress("Finalizing image transfer...")
+    imagetransfer.finalize_transfer(connection, transfer, disk)
 
 # Close the connection to the server:
 connection.close()
